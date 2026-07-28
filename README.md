@@ -1,54 +1,112 @@
-# Learnable Obfuscation on CIFAR-10
+# Learnable Obfuscation for Temporally Related Video Data
 
-This project replicates the CIFAR-10 experiment setup from the Learnable Obfuscation paper using:
-- ResNet-50 pretrained embeddings (2048-d) with L2 normalization
-- Class-k mixing to create soft labels and mixed samples
-- Obfuscation via random masking projection to d=500, Gaussian noise, and label permutation
-- A 3-layer MLP trained on the obfuscated dataset
-- Evaluation by decoding the permuted labels back to the original CIFAR-10 class space
+This repo contains the experiments backing our paper on temporal membership-inference attacks (MIA) against learnable obfuscation of video data. The pipeline sweeps the obfuscation knobs `(k, sigma)`, scores three MIA variants on the resulting embeddings, and measures the downstream classifier accuracy gap.
 
-The main script is `test.py`.
+## CCS revision (round-1 response)
 
-## What the code does
+The `revision/` directory and the new scripts below address the CCS 2026-B
+reviews. The central criticism was that the paper motivated itself with
+temporal correlation but modeled it only in the reward, not the sampling.
+The revision adds:
 
-Pipeline overview:
-1. Embed CIFAR-10 images using pretrained ResNet-50 (ImageNet) to get 2048-d feature vectors, then L2-normalize.
-2. Sample a balanced private subset of size `n` (equal per class).
-3. Build a mixed dataset of size `m` using (i, j)-class-k mixing:
-   - each mixed sample averages k examples from class i and k examples from class j
-   - labels become soft targets: one-hot if i=j, else 50/50 across i and j
-4. Obfuscate the mixed dataset:
-   - project with a random masking matrix W into `d=500`
-   - add Gaussian noise with std `sigma`
-   - permute sample order Π1
-   - permute label space Π2
-5. Train a 3-layer MLP on obfuscated inputs and permuted soft labels.
-6. Evaluate by projecting test embeddings with the same W and inverting Π2 to recover original class predictions.
+- **`src/two_level_prior.py`** — a two-level clip-then-frame *compound prior*
+  (validated against Monte Carlo and recovering the paper's Lemma 3 at `G=1`),
+  showing clustered membership inflates the adversary's upper-tail success.
+- **`src/correlation_aware_attack.py`** — a clip-aggregated MI attack that pools
+  per-frame evidence, vs. the paper's blind per-frame attack, on UCF-101.
+- **`src/synthetic_correlation.py`** — a controlled AR(1) study (dial `rho`)
+  isolating graded leakage, the aware-vs-blind gap, and correlated noise.
+- **`src/membership_inference.py`** — now supports `--noise-mode {iid,clip}`
+  (correlated per-clip noise; backward compatible, default `iid`).
 
-## Results (example runs)
-
-These are example outputs from Apple Silicon MPS:
-- `--n 1000 --m 4000 --k 5 --sigma 0.03 --epochs 5`  → ~79% test accuracy
-- `--n 2000 --m 4000 --k 10 --sigma 0.04 --epochs 10` → ~81% test accuracy
-
-Your exact numbers may vary slightly due to randomness and hardware.
-
-## Requirements
-
-- macOS recommended (Apple Silicon supported via MPS)
-- Python 3.12+ recommended (PyTorch support on very new Python versions can be inconsistent)
-- Packages:
-  - torch
-  - torchvision
-  - numpy
+Deliverables: `revision/REVISION_PLAN.md` (comment-by-comment mapping),
+`revision/response_to_reviewers.md`, and `paper/main.tex` (revised paper source;
+see `paper/REVISION_NOTES.md` for how to integrate). New figures:
+`images/fig_two_level_prior.pdf`, `images/fig_synthetic_correlation.pdf`.
 
 ## Setup
 
-From the project folder:
+### 1. Create a conda environment
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
+```
+conda create -n security python=3.11
+conda activate security
+```
 
-python -m pip install --upgrade pip
-python -m pip install torch torchvision numpy
+### 2. Install PyTorch with CUDA
+
+Follow https://pytorch.org/get-started/locally/ for the right command for your platform. For example:
+
+```
+pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu130
+```
+
+If you don't have a GPU, install `torch` and `torchvision` normally.
+
+### 3. Install remaining dependencies
+
+```
+pip3 install -r requirements.txt
+```
+
+## Running the pipeline
+
+The full sweep (membership-inference attacks, downstream classification accuracy sweep, and figures) is driven by a single script:
+
+```
+bash run_temporal_mia.sh
+```
+
+The script has four phases — you can run them individually:
+
+```
+bash run_temporal_mia.sh smoke      # 1-cell, 2-trial sanity check
+bash run_temporal_mia.sh mia        # MIA sweep across (k, sigma)
+bash run_temporal_mia.sh accuracy   # downstream accuracy sweep
+bash run_temporal_mia.sh plots      # regenerate figures from existing CSVs
+```
+
+### What each phase produces
+
+- **`mia`** — runs `src/membership_inference.py` for each `k` in `K_VALUES`, sweeping all `SIGMAS`. Three attacks are scored per cell (Attack 1: half-integer detection on a single clip; Attack 2: same-class clip identification; Attack 3: frame-of-origin identification across the universe). Per-cell CSVs land in `results/`, and `src/merge_results.py` collates them into `merged_results.csv`.
+- **`accuracy`** — runs `src/main_video.py` for each `(k, sigma)` cell to measure downstream Transformer-classifier accuracy on obfuscated UCF-101. The first cell builds the embedding cache (slow); the rest reuse it. Per-cell CSVs land in `accuracy_results/`, merged into `merged_accuracy.csv`.
+- **`plots`** — produces the paper figures into `images/`:
+  - `fig2_mia_robustness.pdf` (Figure 2): MIA scores vs. sigma for each k, all three attacks.
+  - `fig3_int_vs_half.pdf` (Figure 3): integer-only vs. half-integer Attack 1 scores.
+  - `fig4_pareto.pdf` (Figure 4): privacy/utility Pareto frontier (MIA score vs. accuracy gap).
+
+### Standalone figures
+
+Two figures live outside the main sweep:
+
+- **Figure 1** (`fig1_prior_success.pdf`) — analytical plot of prior attacker success vs. obfuscation parameters. Regenerate with:
+  ```
+  python src/figure1_prior_success.py
+  ```
+- **Figure 5** (`figure5_visual_obfuscation_pixel.pdf`) — qualitative pixel-space visualization (Basketball vs. Skiing under `k=5`, `sigma=0.1`). Regenerate with:
+  ```
+  python src/figure5_visual_obfuscation.py
+  ```
+
+### Compute knobs
+
+The defaults in `run_temporal_mia.sh` are intentionally small for quick iteration. Override via env vars to scale up:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `N_TARGETS` | `10` | MIA targets per `(k, sigma)` cell |
+| `N_TRIALS` | `5` | MC trials per target |
+| `N_CLIP_CANDIDATES` | `50` | Attack 2 same-class candidate pool size |
+| `N_FRAME_CANDIDATES_A3` | `2000` | Attack 3 universe subsample size |
+| `K_VALUES` | `"0 1 5"` | space-separated `k` list |
+| `SIGMAS` | `"0.01 0.05 0.10 0.50"` | space-separated sigma list |
+| `ACC_PARALLEL` | `1` | accuracy jobs in parallel |
+| `SKIP_ACCURACY` | unset | skip the accuracy sweep if set |
+| `CONDA_ENV` | `security` | conda env to run python in |
+
+Examples:
+
+```
+N_TARGETS=50 N_TRIALS=10 bash run_temporal_mia.sh mia
+K_VALUES="0 1" SIGMAS="0.01 0.10" bash run_temporal_mia.sh
+```
